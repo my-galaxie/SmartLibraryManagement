@@ -1,0 +1,51 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Smart Library Backend
+  FastAPI application with Supabase Auth
+
+Globals:
+  Function:
+    Timeout: 30
+
+Resources:
+  SmartLibraryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: adapter.handler
+      Runtime: python3.9
+      Architectures:
+        - x86_64
+      MemorySize: 512
+      Environment:
+        Variables:
+          SUPABASE_URL: !Ref SupabaseUrl
+          SUPABASE_KEY: !Ref SupabaseKey
+          SUPABASE_SERVICE_KEY: !Ref SupabaseServiceKey
+          FRONTEND_URL: !Ref FrontendUrl
+      Events:
+        HttpApi:
+          Type: HttpApi
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+
+Parameters:
+  SupabaseUrl:
+    Type: String
+    Description: URL of the Supabase project
+  SupabaseKey:
+    Type: String
+    Description: Anon Key for Supabase
+  SupabaseServiceKey:
+    Type: String
+    Description: Service Role Key for Supabase
+  FrontendUrl:
+    Type: String
+    Description: URL of the frontend application
+
+Outputs:
+  ApiUrl:
+    Description: "API Gateway endpoint URL for Prod stage"
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/"

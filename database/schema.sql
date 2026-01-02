@@ -139,6 +139,20 @@ CREATE TABLE IF NOT EXISTS public.system_config (
 );
 
 -- ============================================
+-- PROFILE EDIT REQUESTS TABLE
+-- ============================================
+CREATE TABLE IF NOT EXISTS public.profile_requests (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES public.user_profiles(id) ON DELETE CASCADE,
+    requested_changes JSONB NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
+    admin_notes TEXT,
+    reviewed_by UUID REFERENCES public.user_profiles(id) ON DELETE SET NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- ============================================
 -- INDEXES FOR PERFORMANCE
 -- ============================================
 
@@ -277,6 +291,19 @@ CREATE POLICY "Anyone can view system config" ON public.system_config
     FOR SELECT USING (true);
 
 CREATE POLICY "Admins can manage system config" ON public.system_config
+    FOR ALL USING (is_admin());
+
+CREATE POLICY "Admins can manage system config" ON public.system_config
+    FOR ALL USING (is_admin());
+
+-- Profile Requests Policies
+CREATE POLICY "Users can view their own requests" ON public.profile_requests
+    FOR SELECT USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can create requests" ON public.profile_requests
+    FOR INSERT WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Admins can manage profile requests" ON public.profile_requests
     FOR ALL USING (is_admin());
 
 -- ============================================

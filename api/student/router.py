@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from api.dependencies import get_student_user
 from database import get_supabase_client
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import logging
 
 logger = logging.getLogger(__name__)
@@ -28,28 +29,43 @@ async def get_student_dashboard(current_user: dict = Depends(get_student_user)):
         borrowed_books = borrowed_response.data if borrowed_response.data else []
         borrowed_count = len(borrowed_books)
         
-        # Count due soon (within 3 days)
+        # Count due soon (within 3 days) and Calculate dynamic fines
         due_soon_count = 0
         overdue_count = 0
-        now = datetime.now()
+        dynamic_fine = 0
+        
+        # specific timezone
+        tz = ZoneInfo("Asia/Kolkata")
+        now = datetime.now(tz)
         
         for borrow in borrowed_books:
-            due_date = datetime.fromisoformat(borrow["due_date"].replace('Z', '+00:00'))
-            days_until_due = (due_date - now).days
+            # Handle potential Z suffix and ensure timezone awareness
+            due_date_str = borrow["due_date"].replace('Z', '+00:00')
+            due_date = datetime.fromisoformat(due_date_str).astimezone(tz)
             
-            if days_until_due < 0:
+            # Calculate difference in days (using date() to ignore time)
+            days_diff = (now.date() - due_date.date()).days
+            
+            if days_diff > 0:
                 overdue_count += 1
-            elif days_until_due <= 3:
+                # Calculate fine: 5 Rs per day overdue
+                fine_amount = days_diff * 5
+                dynamic_fine += fine_amount
+            elif days_diff >= -3:
+                # Due within next 3 days (days_diff is negative or zero)
                 due_soon_count += 1
         
-        # Get total fines
+        # Get pending fines from database (fines already charged)
         fines_response = supabase.table("fines")\
             .select("amount")\
             .eq("user_id", user_id)\
             .eq("status", "pending")\
             .execute()
         
-        total_fine = sum(fine["amount"] for fine in (fines_response.data or []))
+        persisted_fine = sum(fine["amount"] for fine in (fines_response.data or []))
+        
+        # Total fine is potential/dynamic fine + already charged pending fines
+        total_fine = dynamic_fine + persisted_fine
         
         return {
             "summary": {
@@ -87,20 +103,28 @@ async def get_current_borrowed_books(current_user: dict = Depends(get_student_us
         
         # Format response
         borrowed_books = []
-        now = datetime.now()
+        tz = ZoneInfo("Asia/Kolkata")
+        now = datetime.now(tz)
         
         for borrow in response.data:
             book = borrow.get("books", {})
-            due_date = datetime.fromisoformat(borrow["due_date"].replace('Z', '+00:00'))
-            days_remaining = (due_date - now).days
-            
-            # Determine status
-            if days_remaining < 0:
-                status = "overdue"
-            elif days_remaining <= 3:
-                status = "due_soon"
-            else:
-                status = "safe"
+            try:
+                # Handle potential Z suffix and ensure timezone awareness
+                due_date_str = borrow["due_date"].replace('Z', '+00:00')
+                due_date = datetime.fromisoformat(due_date_str).astimezone(tz)
+                days_remaining = (due_date.date() - now.date()).days
+                
+                # Determine status based on days remaining
+                if days_remaining < 0:
+                    status = "overdue"
+                elif days_remaining <= 3:
+                    status = "due_soon"
+                else:
+                    status = "safe"
+            except Exception as e:
+                logger.error(f"Date parsing error for borrow {borrow['id']}: {e}")
+                days_remaining = 0
+                status = "unknown"
             
             borrowed_books.append({
                 "borrow_id": borrow["id"],
@@ -144,11 +168,21 @@ async def get_borrow_history(current_user: dict = Depends(get_student_user)):
             book = borrow.get("books", {})
             
             # Determine if returned on time
+            # Determine if returned on time
             returned_status = None
             if borrow["return_date"]:
-                return_date = datetime.fromisoformat(borrow["return_date"].replace('Z', '+00:00'))
-                due_date = datetime.fromisoformat(borrow["due_date"].replace('Z', '+00:00'))
-                returned_status = "on_time" if return_date <= due_date else "late"
+                try:
+                    tz = ZoneInfo("Asia/Kolkata")
+                    return_date_str = borrow["return_date"].replace('Z', '+00:00')
+                    due_date_str = borrow["due_date"].replace('Z', '+00:00')
+                    
+                    return_date = datetime.fromisoformat(return_date_str).astimezone(tz)
+                    due_date = datetime.fromisoformat(due_date_str).astimezone(tz)
+                    
+                    returned_status = "on_time" if return_date <= due_date else "late"
+                except Exception as e:
+                    logger.error(f"Date comparison error in history: {e}")
+                    returned_status = "unknown"
             
             history.append({
                 "borrow_id": borrow["id"],
@@ -289,4 +323,193 @@ async def get_student_fines(current_user: dict = Depends(get_student_user)):
     
     except Exception as e:
         logger.error(f"Fines error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/books/search")
+async def search_books(
+    query: str = None,
+    availability: str = None,
+    category: str = None,
+    current_user: dict = Depends(get_student_user)
+):
+    """
+    Search books by title, author, or subject with filters
+    """
+    try:
+        supabase = get_supabase_client()
+        
+        # Base query
+        db_query = supabase.table("books").select("*")
+        
+        # Apply search query
+        if query:
+            # PostgreSQL ilike syntax for multiple columns needs OR logic which Supabase checks via 'or' filter
+            # syntax: .or_('title.ilike.%query%,author.ilike.%query%,subject.ilike.%query%')
+            search_param = f"title.ilike.%{query}%,author.ilike.%{query}%,subject.ilike.%{query}%"
+            db_query = db_query.or_(search_param)
+        
+        # Apply availability filter
+        if availability == "available":
+            db_query = db_query.gt("available_copies", 0)
+        elif availability == "unavailable":
+            db_query = db_query.eq("available_copies", 0)
+            
+        # Apply category/subject filter
+        if category and category != "all-categories":
+            # Mapping frontend values to DB values if needed, or assuming direct match
+            if category == "cs":
+                db_query = db_query.ilike("subject", "%Computer Science%")
+            elif category == "programming":
+                 db_query = db_query.ilike("subject", "%Programming%")
+            elif category == "se":
+                 db_query = db_query.ilike("subject", "%Software Engineering%")
+            else:
+                 db_query = db_query.ilike("subject", f"%{category}%")
+
+        response = db_query.execute()
+        
+        books = []
+        if response.data:
+            for book in response.data:
+                books.append({
+                    "id": book["id"],
+                    "title": book["title"],
+                    "author": book["author"],
+                    "subject": book["subject"],
+                    "available": book["available_copies"],
+                    "total": book["total_copies"],
+                    "description": book.get("description", "")
+                })
+                
+        return {"books": books}
+
+    except Exception as e:
+        logger.error(f"Search books error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/books/{book_id}")
+async def get_book_details(
+    book_id: str,
+    current_user: dict = Depends(get_student_user)
+):
+    """
+    Get detailed information for a specific book
+    """
+    try:
+        supabase = get_supabase_client()
+        
+        response = supabase.table("books")\
+            .select("*")\
+            .eq("id", book_id)\
+            .single()\
+            .execute()
+            
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Book not found")
+            
+        return {"book": response.data}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Get book details error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/profile/request")
+async def request_profile_update(
+    request: dict,
+    current_user: dict = Depends(get_student_user)
+):
+    """
+    Submit a profile update request
+    """
+    try:
+        supabase = get_supabase_client()
+        user_id = current_user["user_id"]
+        
+        # Check for existing pending request
+        pending_check = supabase.table("profile_requests")\
+            .select("id")\
+            .eq("user_id", user_id)\
+            .eq("status", "pending")\
+            .execute()
+            
+        if pending_check.data:
+            # Update existing pending request
+            request_id = pending_check.data[0]["id"]
+            response = supabase.table("profile_requests")\
+                .update({"requested_changes": request, "updated_at": datetime.now().isoformat()})\
+                .eq("id", request_id)\
+                .execute()
+            return {"message": "Profile update request updated", "id": request_id}
+        else:
+            # Create new request
+            response = supabase.table("profile_requests")\
+                .insert({
+                    "user_id": user_id,
+                    "requested_changes": request,
+                    "status": "pending"
+                })\
+                .execute()
+            return {"message": "Profile update request submitted", "id": response.data[0]["id"]}
+
+    except Exception as e:
+        logger.error(f"Profile request error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/profile")
+async def get_student_profile(
+    current_user: dict = Depends(get_student_user)
+):
+    """
+    Get current user's profile information
+    """
+    try:
+        supabase = get_supabase_client()
+        user_id = current_user["user_id"]
+        
+        response = supabase.table("user_profiles")\
+            .select("*")\
+            .eq("id", user_id)\
+            .single()\
+            .execute()
+            
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Profile not found")
+            
+        return {"profile": response.data}
+    except Exception as e:
+        logger.error(f"Get profile error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/profile/request")
+async def get_profile_request(
+    current_user: dict = Depends(get_student_user)
+):
+    """
+    Get current user's profile request status
+    """
+    try:
+        supabase = get_supabase_client()
+        user_id = current_user["user_id"]
+        
+        response = supabase.table("profile_requests")\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .order("created_at", desc=True)\
+            .limit(1)\
+            .execute()
+            
+        if not response.data:
+            return {"request": None}
+            
+        return {"request": response.data[0]}
+
+    except Exception as e:
+        logger.error(f"Get profile request error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

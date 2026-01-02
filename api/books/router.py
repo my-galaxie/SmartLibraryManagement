@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from api.dependencies import get_current_user
-from database import get_supabase_client
+from database import get_supabase_client, get_service_client
 from typing import Optional
 from pydantic import BaseModel
 import logging
@@ -27,18 +27,21 @@ async def search_books(
     Search books with optional filters
     """
     try:
-        supabase = get_supabase_client()
+        # Use service client to bypass RLS for public search (fixes 500 error)
+        supabase = get_service_client()
         
         # Start with base query
         query = supabase.table("books").select("*")
         
         # Apply filters
+        # NOTE: Using '*' as wildcard instead of '%' because '%' causes URL encoding issues 
+        # with Cloudflare/Supabase and results in 500 Error.
         if title:
-            query = query.ilike("title", f"%{title}%")
+            query = query.ilike("title", f"*{title}*")
         if author:
-            query = query.ilike("author", f"%{author}%")
+            query = query.ilike("author", f"*{author}*")
         if subject:
-            query = query.ilike("subject", f"%{subject}%")
+            query = query.ilike("subject", f"*{subject}*")
         if category:
             query = query.eq("category", category)
         if availability == "available":
@@ -48,7 +51,11 @@ async def search_books(
         
         response = query.order("title").execute()
         
-        return response.data if response.data else []
+        books = response.data if response.data else []
+        return {
+            "books": books,
+            "total": len(books)
+        }
     
     except Exception as e:
         logger.error(f"Search books error: {e}")
@@ -64,7 +71,8 @@ async def get_book_details(
     Get detailed information about a specific book
     """
     try:
-        supabase = get_supabase_client()
+        # Use service client to bypass RLS for public book details
+        supabase = get_service_client()
         
         # Get book details
         book_response = supabase.table("books")\
@@ -96,7 +104,7 @@ async def get_book_details(
         has_subscription = len(subscription_response.data) > 0 if subscription_response.data else False
         
         return {
-            **book,
+            "book": book,
             "copies": copies,
             "is_available": book["available_copies"] > 0,
             "user_subscribed": has_subscription

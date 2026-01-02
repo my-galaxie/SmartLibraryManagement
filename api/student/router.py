@@ -52,10 +52,12 @@ async def get_student_dashboard(current_user: dict = Depends(get_student_user)):
         total_fine = sum(fine["amount"] for fine in (fines_response.data or []))
         
         return {
-            "borrowed_count": borrowed_count,
-            "due_soon": due_soon_count,
-            "overdue": overdue_count,
-            "total_fine": float(total_fine)
+            "summary": {
+                "currently_borrowed": borrowed_count,
+                "due_soon": due_soon_count,
+                "overdue": overdue_count,
+                "total_fine": float(total_fine)
+            }
         }
     
     except Exception as e:
@@ -81,7 +83,7 @@ async def get_current_borrowed_books(current_user: dict = Depends(get_student_us
             .execute()
         
         if not response.data:
-            return []
+            return {"books": []}
         
         # Format response
         borrowed_books = []
@@ -112,7 +114,7 @@ async def get_current_borrowed_books(current_user: dict = Depends(get_student_us
                 "fine_amount": float(borrow.get("fine_amount", 0))
             })
         
-        return borrowed_books
+        return {"books": borrowed_books}
     
     except Exception as e:
         logger.error(f"Current books error: {e}")
@@ -135,7 +137,7 @@ async def get_borrow_history(current_user: dict = Depends(get_student_user)):
             .execute()
         
         if not response.data:
-            return []
+            return {"history": []}
         
         history = []
         for borrow in response.data:
@@ -161,7 +163,7 @@ async def get_borrow_history(current_user: dict = Depends(get_student_user)):
                 "fine_amount": float(borrow.get("fine_amount", 0))
             })
         
-        return history
+        return {"history": history}
     
     except Exception as e:
         logger.error(f"Borrow history error: {e}")
@@ -184,7 +186,15 @@ async def get_student_notifications(current_user: dict = Depends(get_student_use
             .limit(50)\
             .execute()
         
-        return response.data if response.data else []
+        notifications = response.data if response.data else []
+        
+        # Calculate unread count
+        unread_count = sum(1 for n in notifications if not n.get("is_read", False))
+        
+        return {
+            "notifications": notifications,
+            "unread_count": unread_count
+        }
     
     except Exception as e:
         logger.error(f"Notifications error: {e}")

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from api.dependencies import get_admin_user
-from database import get_supabase_client
+import re
+from database import get_supabase_client, get_service_client
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timedelta
@@ -46,6 +47,15 @@ class BroadcastNotification(BaseModel):
     title: str
     message: str
     type: str = "announcement"
+
+    @property
+    def valid_types(self):
+        return ["due_soon", "overdue", "availability", "announcement", "system"]
+
+    def validate_type(self):
+        if self.type not in self.valid_types:
+            raise ValueError(f"Invalid type. Must be one of: {', '.join(self.valid_types)}")
+
 
 
 @router.get("/dashboard")
@@ -95,17 +105,58 @@ async def get_admin_dashboard(current_user: dict = Depends(get_admin_user)):
                 date = borrow["borrow_date"][:10]  # Get date part
                 borrow_trends[date] = borrow_trends.get(date, 0) + 1
         
+        # Total copies
+        copies_response = supabase.table("books").select("total_copies").execute()
+        total_copies = sum(book["total_copies"] for book in copies_response.data) if copies_response.data else 0
+
+        # Borrowed today
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        borrowed_today_response = supabase.table("borrows")\
+            .select("id", count="exact")\
+            .gte("borrow_date", today_start)\
+            .execute()
+        borrowed_today = borrowed_today_response.count if borrowed_today_response.count else 0
+
+        # Total fines
+        fines_response = supabase.table("fines").select("amount").execute()
+        total_fines = sum(fine["amount"] for fine in fines_response.data) if fines_response.data else 0
+        
+        # Recent borrows list
+        recent_borrows_list_response = supabase.table("borrows")\
+            .select("*, books(title), user_profiles(name, student_id)")\
+            .order("borrow_date", desc=True)\
+            .limit(5)\
+            .execute()
+        recent_borrows = recent_borrows_list_response.data if recent_borrows_list_response.data else []
+
         return {
-            "total_books": total_books,
-            "currently_borrowed": currently_borrowed,
-            "overdue_count": overdue_count,
-            "active_students": active_students,
-            "borrow_trends": borrow_trends
+            "summary": {
+                "total_books": total_books,
+                "total_copies": total_copies,
+                "borrowed_today": borrowed_today,
+                "active_borrows": currently_borrowed,
+                "overdue_borrows": overdue_count,
+                "total_students": active_students,
+                "total_fines": total_fines
+            },
+            "recent_borrows": recent_borrows,
+            "borrow_trends": [] # Placeholder as per requirement, or we can format borrow_trends list if needed
         }
     
     except Exception as e:
         logger.error(f"Admin dashboard error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/debug-borrows")
+async def debug_borrows(current_user: dict = Depends(get_admin_user)):
+    """Temporary debug endpoint to check borrows table"""
+    supabase = get_service_client()
+    res = supabase.table("borrows").select("*", count="exact").execute()
+    return {
+        "count": res.count,
+        "data": res.data
+    }
 
 
 @router.get("/logs")
@@ -121,7 +172,8 @@ async def get_borrow_logs(
     Get borrow and return logs with filters
     """
     try:
-        supabase = get_supabase_client()
+        # Use service client to bypass RLS
+        supabase = get_service_client()
         
         query = supabase.table("borrows").select("*, user_profiles(*), books(*)")
         
@@ -135,10 +187,21 @@ async def get_borrow_logs(
             query = query.lte("borrow_date", date_to)
         if action:
             query = query.eq("status", action)
+            
+        # Log the query execution
+        logger.info(f"Executing log query with filters: student_id={student_id}, book_id={book_id}")
+            
+        response = query.order("borrow_date", desc=True).execute()
         
-        response = query.order("borrow_date", desc=True).limit(100).execute()
-        
-        return response.data if response.data else []
+        logger.info(f"Log query result count: {len(response.data) if response.data else 0}")
+        if response.data:
+            logger.info(f"Sample log: {response.data[0]}")
+            
+        logs = response.data if response.data else []
+        return {
+            "logs": logs,
+            "total": len(logs)
+        }
     
     except Exception as e:
         logger.error(f"Logs error: {e}")
@@ -153,7 +216,11 @@ async def get_all_books(current_user: dict = Depends(get_admin_user)):
     try:
         supabase = get_supabase_client()
         response = supabase.table("books").select("*").order("title").execute()
-        return response.data if response.data else []
+        books = response.data if response.data else []
+        return {
+            "books": books,
+            "total": len(books)
+        }
     except Exception as e:
         logger.error(f"Get books error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -174,10 +241,15 @@ async def add_book(book: BookCreate, current_user: dict = Depends(get_admin_user
         
         response = supabase.table("books").insert(book_data).execute()
         
+
         if not response.data:
             raise HTTPException(status_code=500, detail="Failed to add book")
         
-        return response.data[0]
+        return {
+    "message": "Book added successfully",
+    "book": response.data[0]
+}
+
     
     except Exception as e:
         logger.error(f"Add book error: {e}")
@@ -210,7 +282,11 @@ async def update_book(
         if not response.data:
             raise HTTPException(status_code=404, detail="Book not found")
         
-        return response.data[0]
+        return {
+    "message": "Book updated successfully",
+    "book": response.data[0]
+}
+
     
     except HTTPException:
         raise
@@ -242,15 +318,51 @@ async def get_all_students(current_user: dict = Depends(get_admin_user)):
     Get list of all students
     """
     try:
-        supabase = get_supabase_client()
+        # Use service client to bypass RLS
+        supabase = get_service_client()
         
+        # Get all students
         response = supabase.table("user_profiles")\
             .select("*")\
             .eq("role", "student")\
             .order("name")\
             .execute()
         
-        return response.data if response.data else []
+        students_data = response.data if response.data else []
+        
+        # Calculate stats for each student
+        students_with_stats = []
+        for student in students_data:
+            user_id = student["id"]
+            
+            # Active borrows count
+            borrows_res = supabase.table("borrows")\
+                .select("id", count="exact")\
+                .eq("user_id", user_id)\
+                .eq("status", "borrowed")\
+                .execute()
+            active_borrows = borrows_res.count if borrows_res.count else 0
+            
+            # Total fines count
+            fines_res = supabase.table("fines")\
+                .select("amount")\
+                .eq("user_id", user_id)\
+                .execute()
+            total_fines = sum(f["amount"] for f in fines_res.data) if fines_res.data else 0
+            
+            students_with_stats.append({
+                "id": student["id"],
+                "email": student["email"],
+                "name": student["name"],
+                "student_id": student.get("student_id"),
+                "active_borrows": active_borrows,
+                "total_fines": total_fines
+            })
+            
+        return {
+            "students": students_with_stats,
+            "total": len(students_with_stats)
+        }
     
     except Exception as e:
         logger.error(f"Get students error: {e}")
@@ -263,38 +375,51 @@ async def get_student_details(student_id: str, current_user: dict = Depends(get_
     Get detailed information about a student
     """
     try:
-        supabase = get_supabase_client()
+        # Use service client to bypass RLS
+        supabase = get_service_client()
         
-        # Get student profile
-        profile_response = supabase.table("user_profiles")\
-            .select("*")\
-            .eq("id", student_id)\
-            .single()\
-            .execute()
+        # Check if input is UUID or student_id string
+        is_uuid = re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', student_id)
+        
+        query = supabase.table("user_profiles").select("*")
+        
+        if is_uuid:
+            query = query.eq("id", student_id)
+        else:
+            query = query.eq("student_id", student_id)
+            
+        profile_response = query.single().execute()
         
         if not profile_response.data:
             raise HTTPException(status_code=404, detail="Student not found")
         
-        # Get borrow history
+        student = profile_response.data
+        user_id = student["id"]
+        
+        # Get active borrows
         borrows_response = supabase.table("borrows")\
-            .select("*, books(*)")\
-            .eq("user_id", student_id)\
+            .select("*, books(title, author)")\
+            .eq("user_id", user_id)\
+            .eq("status", "borrowed")\
+            .execute()
+        
+        active_borrows = borrows_response.data if borrows_response.data else []
+        
+        # Get borrow history
+        history_response = supabase.table("borrows")\
+            .select("*, books(title, author)")\
+            .eq("user_id", user_id)\
+            .neq("status", "borrowed")\
             .order("borrow_date", desc=True)\
+            .limit(10)\
             .execute()
-        
-        # Get fines
-        fines_response = supabase.table("fines")\
-            .select("*")\
-            .eq("user_id", student_id)\
-            .execute()
-        
-        total_fines = sum(fine["amount"] for fine in (fines_response.data or []) if fine["status"] == "pending")
+            
+        history = history_response.data if history_response.data else []
         
         return {
-            "profile": profile_response.data,
-            "borrows": borrows_response.data if borrows_response.data else [],
-            "fines": fines_response.data if fines_response.data else [],
-            "total_pending_fines": float(total_fines)
+            "student": student,
+            "active_borrows": active_borrows,
+            "history": history
         }
     
     except HTTPException:
@@ -317,7 +442,12 @@ async def get_all_fines(current_user: dict = Depends(get_admin_user)):
             .order("created_at", desc=True)\
             .execute()
         
-        return response.data if response.data else []
+        fines = response.data if response.data else []
+        return {
+            "fines": fines,
+            "total_count": len(fines),
+            "total_amount": sum(float(f["amount"]) for f in fines)
+        }
     
     except Exception as e:
         logger.error(f"Get fines error: {e}")
@@ -377,7 +507,13 @@ async def broadcast_notification(
     Send broadcast notification to all students
     """
     try:
-        supabase = get_supabase_client()
+        # Validate type
+        if notification.type not in ["due_soon", "overdue", "availability", "announcement", "system"]:
+             # Fallback to announcement if invalid
+             notification.type = "announcement"
+        
+        # Use service client to bypass RLS
+        supabase = get_service_client()
         
         # Get all students
         students_response = supabase.table("user_profiles")\

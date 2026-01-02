@@ -2,6 +2,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from config import settings
 import logging
+from fastapi import Request
+import time
+import json
+from starlette.middleware.base import BaseHTTPMiddleware
+
 
 # Import routers
 from auth.router import router as auth_router
@@ -36,6 +41,49 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Logging Middleware
+class LoggingMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        start_time = time.time()
+        
+        # Read body properly
+        body = await request.body()
+        
+        # Re-inject body for next handler
+        async def receive():
+            return {"type": "http.request", "body": body}
+        request._receive = receive
+        
+        # Log Request
+        log_entry = f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] REQUEST: {request.method} {request.url}\n"
+        try:
+            if body:
+                log_entry += f"Body: {body.decode()}\n"
+        except:
+            log_entry += "Body: (binary/unreadable)\n"
+            
+        with open("api_debug.log", "a", encoding="utf-8") as f:
+            f.write(log_entry)
+            
+        # Process Request
+        try:
+            response = await call_next(request)
+            process_time = time.time() - start_time
+            
+            # Log Response
+            log_entry = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] RESPONSE: {response.status_code} ({process_time:.4f}s)\n"
+            with open("api_debug.log", "a", encoding="utf-8") as f:
+                f.write(log_entry)
+                
+            return response
+        except Exception as e:
+            log_entry = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ERROR: {str(e)}\n"
+            with open("api_debug.log", "a", encoding="utf-8") as f:
+                f.write(log_entry)
+            raise
+
+app.add_middleware(LoggingMiddleware)
 
 # Include routers
 # Auth Stack

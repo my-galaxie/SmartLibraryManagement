@@ -37,6 +37,7 @@ class AuthService:
     @staticmethod
     async def signup(email: str, password: str, role: str, name: str, student_id: Optional[str] = None) -> dict:
         """Register new user"""
+        logger.info(f"Attempting signup for email: {email}, role: {role}")
         try:
             # Use service client for signup to have full access
             service_client = get_service_client()
@@ -45,8 +46,12 @@ class AuthService:
             auth_response = service_client.auth.admin.create_user({
                 "email": email,
                 "password": password,
-                "email_confirm": True  # Auto-confirm email for testing
+                "email_confirm": False  # Use False to trigger email confirmation (depends on Supabase settings)
             })
+            
+            # If auto-confirm is OFF in Supabase, user is created but email_confirmed_at is null
+            # auth_response.user is still returned
+
             
             if not auth_response.user:
                 raise ValueError("Failed to create user")
@@ -96,6 +101,7 @@ class AuthService:
     @staticmethod
     async def login(email: str, password: str) -> dict:
         """Authenticate user and return token"""
+        logger.info(f"Attempting login for email: {email}")
         try:
             supabase = get_supabase_client()
             
@@ -105,26 +111,21 @@ class AuthService:
                 "password": password
             })
             
-            if not auth_response.user:
+            if not auth_response.user or not auth_response.session:
                 raise ValueError("Invalid credentials")
             
             user_id = auth_response.user.id
-            
+            access_token = auth_response.session.access_token
+
             # Get user profile to fetch role and name
-            profile_response = supabase.table("user_profiles").select("*").eq("id", user_id).execute()
+            # Note: We use the SERVICE client here to ensure we can read the profile even if RLS is strict
+            service_client = get_service_client()
+            profile_response = service_client.table("user_profiles").select("*").eq("id", user_id).execute()
             
             if not profile_response.data:
                 raise ValueError("User profile not found")
             
             profile = profile_response.data[0]
-            
-            # Create our own JWT token with user info
-            token_data = {
-                "sub": user_id,
-                "email": email,
-                "role": profile["role"]
-            }
-            access_token = AuthService.create_access_token(token_data)
             
             return {
                 "access_token": access_token,
@@ -136,28 +137,81 @@ class AuthService:
             
         except Exception as e:
             logger.error(f"Login error: {e}")
-            logger.error(f"Login error type: {type(e).__name__}")
-            logger.error(f"Login error details: {repr(e)}")
             raise Exception(f"Login failed: {str(e)}")
     
     @staticmethod
     async def validate_token(token: str) -> dict:
         """Validate JWT token and return user info"""
-        payload = AuthService.verify_token(token)
-        
-        if not payload:
-            raise ValueError("Invalid token")
-        
-        user_id = payload.get("sub")
-        email = payload.get("email")
-        role = payload.get("role")
-        
-        if not all([user_id, email, role]):
-            raise ValueError("Invalid token payload")
-        
-        return {
-            "valid": True,
-            "user_id": user_id,
-            "email": email,
-            "role": role
-        }
+        try:
+            supabase = get_supabase_client()
+            # Verify with Supabase Auth
+            user_response = supabase.auth.get_user(token)
+            
+            if not user_response.user:
+                logger.error(f"Supabase Auth Error: {user_response}")
+                raise ValueError(f"Supabase rejected token. Response: {user_response}")
+            
+            user = user_response.user
+            
+            # Check Profile
+            # Use service client to ensure we can read/write profile
+            service_client = get_service_client()
+            profile_response = service_client.table("user_profiles").select("*").eq("id", user.id).execute()
+            
+            if not profile_response.data:
+                # First time Google Login (or other OAuth) - Create Profile
+                logger.info(f"Profile not found for {user.email}, creating default student profile.")
+                try:
+                    name = user.user_metadata.get('full_name') or user.user_metadata.get('name') or user.email.split('@')[0]
+                    
+                    new_profile = {
+                        "id": user.id,
+                        "email": user.email,
+                        "name": name,
+                        "role": "student"  # Default role
+                    }
+                    service_client.table("user_profiles").insert(new_profile).execute()
+                    
+                    role = "student"
+                    profile_name = name
+                except Exception as e:
+                    logger.error(f"Auto-create profile failed: {e}")
+                    raise ValueError("Failed to create user profile")
+            else:
+                role = profile_response.data[0]['role']
+                profile_name = profile_response.data[0]['name']
+
+            return {
+                "valid": True,
+                "user_id": user.id,
+                "email": user.email,
+                "role": role,
+                "name": profile_name
+            }
+            
+        except Exception as e:
+            logger.error(f"Token validation failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            # Bubble up the actual error for debugging
+            raise ValueError(f"Token validation failed: {str(e)}")
+
+    @staticmethod
+    async def verify_otp(email: str, token: str, type: str = "signup") -> dict:
+        """Verify OTP/Email verification"""
+        try:
+            supabase = get_supabase_client()
+            response = supabase.auth.verify_otp({
+                "email": email,
+                "token": token,
+                "type": type
+            })
+            
+            if not response.user:
+                 raise ValueError("Verification failed")
+                 
+            return {"message": "Email verified successfully"}
+            
+        except Exception as e:
+            logger.error(f"OTP verification error: {e}")
+            raise Exception(f"Verification failed: {str(e)}")

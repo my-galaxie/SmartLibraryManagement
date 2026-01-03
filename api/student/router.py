@@ -4,6 +4,8 @@ from database import get_supabase_client
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import logging
+from pydantic import BaseModel
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -484,6 +486,49 @@ async def get_student_profile(
         return {"profile": response.data}
     except Exception as e:
         logger.error(f"Get profile error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ProfileUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    student_id: Optional[str] = None
+
+
+@router.put("/profile")
+async def update_student_profile(
+    request: ProfileUpdateRequest,
+    current_user: dict = Depends(get_student_user)
+):
+    """
+    Update current user's profile information directly
+    """
+    try:
+        supabase = get_supabase_client()
+        user_id = current_user["user_id"]
+        
+        updates = {}
+        if request.name:
+            updates["name"] = request.name
+        if request.student_id:
+            updates["student_id"] = request.student_id
+            
+        if not updates:
+            raise HTTPException(status_code=400, detail="No changes provided")
+            
+        response = supabase.table("user_profiles")\
+            .update(updates)\
+            .eq("id", user_id)\
+            .execute()
+            
+        if not response.data:
+            raise HTTPException(status_code=404, detail="Profile not found or update failed")
+            
+        return {"message": "Profile updated successfully", "profile": response.data[0]}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Update profile error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

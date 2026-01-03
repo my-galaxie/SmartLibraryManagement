@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Header
 from typing import Optional
-from auth.models import SignupRequest, LoginRequest, LoginResponse, ValidateResponse
+from auth.models import SignupRequest, LoginRequest, LoginResponse, ValidateResponse, VerifyOTPRequest
 from auth.service import AuthService
 import logging
 
@@ -86,3 +86,17 @@ async def logout():
     Since we're using stateless JWT, actual logout happens on client side
     """
     return {"message": "Logout successful"}
+
+
+@router.post("/verify")
+async def verify_otp(request: VerifyOTPRequest):
+    """
+    Verify OTP for email confirmation
+    """
+    try:
+        await AuthService.verify_otp(request.email, request.otp, request.type)
+        return {"message": "Verification successful"}
+    except Exception as e:
+        logger.error(f"Verification endpoint error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+

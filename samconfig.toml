@@ -7,7 +7,7 @@ resolve_s3 = true
 confirm_changeset = true
 s3_prefix = "smart-library-backend"
 disable_rollback = true
-parameter_overrides = "SupabaseUrl=\"https://xxqqgltsrycvhkgqquek.supabase.co\" SupabaseKey=\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh4cXFnbHRzcnljdmhrZ3FxdWVrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM0NDY3OTEsImV4cCI6MjA3OTAyMjc5MX0.81gNAzUC9DcLBmX1alTS64lEIu0GESKzmwt0HNltuE0\" SupabaseServiceKey=\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh4cXFnbHRzcnljdmhrZ3FxdWVrIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2MzQ0Njc5MSwiZXhwIjoyMDc5MDIyNzkxfQ.Vv3afvkvkDat5Mos6Tb6z4kFsLECfQPe7n5_B6RClcA\" FrontendUrl=\"*\""
+parameter_overrides = "FrontendUrl=\"*\""
 image_repositories = []
 
 [default.global.parameters]

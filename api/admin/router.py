@@ -41,6 +41,8 @@ class FineConfigUpdate(BaseModel):
     fine_per_day: Optional[float] = None
     grace_period_days: Optional[int] = None
     borrow_duration_days: Optional[int] = None
+    reminder_days: Optional[int] = None
+    overdue_frequency: Optional[str] = None
 
 
 class BroadcastNotification(BaseModel):
@@ -129,6 +131,46 @@ async def get_admin_dashboard(current_user: dict = Depends(get_admin_user)):
             .execute()
         recent_borrows = recent_borrows_list_response.data if recent_borrows_list_response.data else []
 
+
+        # Group by date for borrow trends (last 7 days)
+        borrow_trends_data = []
+        today = datetime.now().date()
+        for i in range(6, -1, -1):
+             date_val = today - timedelta(days=i)
+             date_str = date_val.isoformat()
+             day_name = date_val.strftime("%a") # Mon, Tue
+             count = borrow_trends.get(date_str, 0)
+             borrow_trends_data.append({"day": day_name, "borrows": count})
+
+        # Overdue trends (last 6 months - mock for now or calculate if possible)
+        # Real calculation would need historical overdue logs which we might not have fully tracked
+        # We will query borrows table where status=overdue created_at in range
+        # For now, let's just return what we can or kept it static if data model is limited
+        # But user wants real data. Let's try to query metrics if possible.
+        # Check 'fines' table creation date for proxy of overdue incidents?
+        
+        overdue_trends_data = []
+        # Simple proxy: count fines by month
+        six_months_ago = (datetime.now() - timedelta(days=180)).isoformat()
+        fines_trend_res = supabase.table("fines")\
+            .select("created_at")\
+            .gte("created_at", six_months_ago)\
+            .execute()
+            
+        fines_by_month = {}
+        if fines_trend_res.data:
+            for fine in fines_trend_res.data:
+                # Format: YYYY-MM
+                month_key = fine["created_at"][:7]
+                fines_by_month[month_key] = fines_by_month.get(month_key, 0) + 1
+        
+        # Fill last 6 months
+        for i in range(5, -1, -1):
+            d = today - timedelta(days=i*30)
+            m_key = d.strftime("%Y-%m")
+            m_name = d.strftime("%b")
+            overdue_trends_data.append({"month": m_name, "overdue": fines_by_month.get(m_key, 0)})
+
         return {
             "summary": {
                 "total_books": total_books,
@@ -140,7 +182,8 @@ async def get_admin_dashboard(current_user: dict = Depends(get_admin_user)):
                 "total_fines": total_fines
             },
             "recent_borrows": recent_borrows,
-            "borrow_trends": [] # Placeholder as per requirement, or we can format borrow_trends list if needed
+            "borrow_trends": borrow_trends_data,
+            "overdue_trends": overdue_trends_data
         }
     
     except Exception as e:
@@ -483,6 +526,18 @@ async def update_fine_config(
                 "key": "borrow_duration_days",
                 "value": str(config.borrow_duration_days)
             })
+
+        if config.reminder_days is not None:
+            updates.append({
+                "key": "reminder_days",
+                "value": str(config.reminder_days)
+            })
+
+        if config.overdue_frequency is not None:
+            updates.append({
+                "key": "overdue_frequency",
+                "value": str(config.overdue_frequency)
+            })
         
         # Update each config value
         for update in updates:
@@ -543,6 +598,60 @@ async def broadcast_notification(
     
     except Exception as e:
         logger.error(f"Broadcast notification error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/notifications/history")
+async def get_notification_history(current_user: dict = Depends(get_admin_user)):
+    """
+    Get history of sent broadcast notifications
+    """
+    try:
+        supabase = get_supabase_client()
+        
+        # Get recent announcements (limit to last 50 to process)
+        # distinct() is not directly available in standard postgrest-py builder easily in this version maybe?
+        # We fetch all announcement type notifications ordered by time
+        
+        response = supabase.table("notifications")\
+            .select("title, message, created_at, type")\
+            .eq("type", "announcement")\
+            .order("created_at", desc=True)\
+            .limit(100)\
+            .execute()
+            
+        if not response.data:
+            return {"notifications": []}
+            
+        # Deduplicate in python
+        # Group by (title, message, created_at minute) to avoid duplicates for same broadcast
+        unique_notifications = []
+        seen = set()
+        
+        for notif in response.data:
+            # Create a signature. created_at might differ by milliseconds if inserted sequentially, 
+            # but usually for a broadcast they are close. 
+            # Or simplified: checking title+message. 
+            # If a user sends same message twice, we might dedupe it unintentionally if we ignore time.
+            # Let's use first 16 chars of timestamp (min resolution)
+            
+            ts = notif["created_at"][:16] # YYYY-MM-DDTHH:MM
+            sig = (notif["title"], notif["message"], ts)
+            
+            if sig not in seen:
+                seen.add(sig)
+                unique_notifications.append({
+                    "id": f"{ts}-{len(seen)}", # Generate a temp id
+                    "title": notif["title"],
+                    "message": notif["message"],
+                    "created_at": notif["created_at"],
+                    "type": notif["type"]
+                })
+        
+        return {"notifications": unique_notifications[:20]} # Return top 20
+        
+    except Exception as e:
+        logger.error(f"Notification history error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

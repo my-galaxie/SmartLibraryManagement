@@ -36,7 +36,7 @@ app = FastAPI(
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_url, "http://localhost:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -56,15 +56,14 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         request._receive = receive
         
         # Log Request
-        log_entry = f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] REQUEST: {request.method} {request.url}\n"
+        log_msg = f"REQUEST: {request.method} {request.url}"
         try:
             if body:
-                log_entry += f"Body: {body.decode()}\n"
+                log_msg += f" Body: {body.decode()}"
         except:
-            log_entry += "Body: (binary/unreadable)\n"
-            
-        with open("api_debug.log", "a", encoding="utf-8") as f:
-            f.write(log_entry)
+            log_msg += " Body: (binary/unreadable)"
+        
+        logger.info(log_msg)
             
         # Process Request
         try:
@@ -72,15 +71,11 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             process_time = time.time() - start_time
             
             # Log Response
-            log_entry = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] RESPONSE: {response.status_code} ({process_time:.4f}s)\n"
-            with open("api_debug.log", "a", encoding="utf-8") as f:
-                f.write(log_entry)
+            logger.info(f"RESPONSE: {response.status_code} ({process_time:.4f}s)")
                 
             return response
         except Exception as e:
-            log_entry = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ERROR: {str(e)}\n"
-            with open("api_debug.log", "a", encoding="utf-8") as f:
-                f.write(log_entry)
+            logger.error(f"ERROR: {str(e)}")
             raise
 
 app.add_middleware(LoggingMiddleware)

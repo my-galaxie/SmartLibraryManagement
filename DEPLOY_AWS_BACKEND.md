@@ -28,8 +28,8 @@ sam deploy --guided
 ```
 
 Fill in the prompts:
--   **Stack Name**: `smart-library-backend`
--   **AWS Region**: `us-east-1` (or your preferred region)
+-   **Stack Name**: `smart-library` (Preserve default)
+-   **AWS Region**: `ap-south-1` (Preserve default)
 -   **Parameter SupabaseUrl**: [Your Supabase Project URL]
 -   **Parameter SupabaseKey**: [Your Supabase Anon Key]
 -   **Parameter SupabaseServiceKey**: [Your Supabase Service Role Key]

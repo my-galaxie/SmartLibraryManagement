@@ -35,7 +35,7 @@ class AuthService:
             return None
     
     @staticmethod
-    async def signup(email: str, password: str, role: str, name: str, student_id: Optional[str] = None) -> dict:
+    async def signup(email: str, password: str, role: str, name: str, student_id: Optional[str] = None, department: Optional[str] = None) -> dict:
         """Register new user"""
         logger.info(f"Attempting signup for email: {email}, role: {role}")
         try:
@@ -65,7 +65,8 @@ class AuthService:
                 "email": email,
                 "name": name,
                 "role": role,
-                "student_id": student_id
+                "student_id": student_id,
+                "department": department
             }
             
             # Insert profile with service client to bypass RLS

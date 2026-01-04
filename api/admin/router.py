@@ -5,6 +5,7 @@ from database import get_supabase_client, get_service_client
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import logging
 
 logger = logging.getLogger(__name__)
@@ -260,6 +261,32 @@ async def get_all_books(current_user: dict = Depends(get_admin_user)):
         supabase = get_supabase_client()
         response = supabase.table("books").select("*").order("title").execute()
         books = response.data if response.data else []
+        
+        # Calculate real-time available copies
+        # 1. Get all active borrows (borrowed or overdue)
+        active_borrows_res = supabase.table("borrows")\
+            .select("book_id")\
+            .in_("status", ["borrowed", "overdue"])\
+            .execute()
+            
+        borrow_counts = {}
+        if active_borrows_res.data:
+            for borrow in active_borrows_res.data:
+                bid = borrow["book_id"]
+                borrow_counts[bid] = borrow_counts.get(bid, 0) + 1
+                
+        # 2. Update book objects
+        for book in books:
+            book_id = book["id"]
+            total = book["total_copies"]
+            borrowed = borrow_counts.get(book_id, 0)
+            
+            # Ensure we don't show negative available copies due to data inconsistency
+            available = max(0, total - borrowed)
+            
+            book["available_copies"] = available
+            book["borrowed_copies"] = borrowed
+
         return {
             "books": books,
             "total": len(books)
@@ -386,19 +413,30 @@ async def get_all_students(current_user: dict = Depends(get_admin_user)):
                 .execute()
             active_borrows = borrows_res.count if borrows_res.count else 0
             
+            # Overdue count
+            overdue_res = supabase.table("borrows")\
+                .select("id", count="exact")\
+                .eq("user_id", user_id)\
+                .eq("status", "overdue")\
+                .execute()
+            overdue_count = overdue_res.count if overdue_res.count else 0
+            
             # Total fines count
             fines_res = supabase.table("fines")\
                 .select("amount")\
                 .eq("user_id", user_id)\
                 .execute()
-            total_fines = sum(f["amount"] for f in fines_res.data) if fines_res.data else 0
+            # Fines might be string or float in DB
+            total_fines = sum(float(f["amount"]) for f in fines_res.data) if fines_res.data else 0.0
             
             students_with_stats.append({
                 "id": student["id"],
                 "email": student["email"],
                 "name": student["name"],
                 "student_id": student.get("student_id"),
+                "department": student.get("department"),
                 "active_borrows": active_borrows,
+                "overdue_borrows": overdue_count,
                 "total_fines": total_fines
             })
             
@@ -607,7 +645,7 @@ async def get_notification_history(current_user: dict = Depends(get_admin_user))
     Get history of sent broadcast notifications
     """
     try:
-        supabase = get_supabase_client()
+        supabase = get_service_client()
         
         # Get recent announcements (limit to last 50 to process)
         # distinct() is not directly available in standard postgrest-py builder easily in this version maybe?
@@ -736,4 +774,102 @@ async def process_profile_request(
         raise
     except Exception as e:
         logger.error(f"Process request error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+@router.post("/borrows/{borrow_id}/return")
+async def return_book(
+    borrow_id: str,
+    current_user: dict = Depends(get_admin_user)
+):
+    """
+    Mark a book as returned
+    """
+    try:
+        # Use service client to bypass RLS and ensure admin can modify any borrow
+        from database import get_service_client
+        supabase = get_service_client()
+        
+        # Get borrow record
+        borrow_res = supabase.table("borrows").select("*").eq("id", borrow_id).single().execute()
+        if not borrow_res.data:
+            raise HTTPException(status_code=404, detail="Borrow record not found")
+        
+        borrow = borrow_res.data
+        if borrow["status"] == "returned":
+            raise HTTPException(status_code=400, detail="Book already returned")
+            
+        # Calculate fine if overdue
+        tz = ZoneInfo("Asia/Kolkata")
+        now = datetime.now(tz)
+        
+        # Handle due_date parsing
+        due_date_str = borrow["due_date"].replace('Z', '+00:00')
+        due_date = datetime.fromisoformat(due_date_str).astimezone(tz)
+        
+        fine_amount = 0.0
+        days_overdue = (now.date() - due_date.date()).days
+        
+        if days_overdue > 0:
+            # Get fine config
+            config_res = supabase.table("system_config").select("*").eq("key", "fine_per_day").execute()
+            fine_per_day = 5.0
+            if config_res.data:
+                fine_per_day = float(config_res.data[0]["value"])
+            
+            fine_amount = days_overdue * fine_per_day
+            
+            # Create fine record
+            supabase.table("fines").insert({
+                "user_id": borrow["user_id"],
+                "borrow_id": borrow_id,
+                "amount": fine_amount,
+                "status": "pending",
+                "days_overdue": days_overdue
+            }).execute()
+            
+        # Update borrow record
+        supabase.table("borrows").update({
+            "status": "returned",
+            "return_date": now.isoformat(),
+            "updated_at": now.isoformat()
+        }).eq("id", borrow_id).execute()
+        
+        return {
+            "message": "Book returned successfully",
+            "fine_generated": fine_amount > 0,
+            "fine_amount": fine_amount
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Return book error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/notifications/broadcast")
+async def delete_broadcast(
+    title: str = Query(...),
+    message: str = Query(...),
+    type: str = Query(...),
+    current_user: dict = Depends(get_admin_user)
+):
+    """
+    Delete a broadcast notification (removes for all students)
+    """
+    try:
+        supabase = get_service_client()
+        
+        # Delete notifications matching title, message, and type (and ideally created recently, but exact match is fine)
+        # using service client to allow batch delete if RLS restricts
+        response = supabase.table("notifications")\
+            .delete()\
+            .eq("title", title)\
+            .eq("message", message)\
+            .eq("type", type)\
+            .execute()
+            
+        return {"message": "Broadcast notification deleted"}
+        
+    except Exception as e:
+        logger.error(f"Delete broadcast error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

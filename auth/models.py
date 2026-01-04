@@ -8,6 +8,7 @@ class SignupRequest(BaseModel):
     role: str = Field(..., pattern="^(student|admin)$")
     name: str = Field(..., min_length=2)
     student_id: Optional[str] = None
+    department: Optional[str] = None
 
     @field_validator('password')
     @classmethod

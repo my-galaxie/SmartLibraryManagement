@@ -212,7 +212,9 @@ async def get_student_notifications(current_user: dict = Depends(get_student_use
     Get all notifications for the student
     """
     try:
-        supabase = get_supabase_client()
+        # Use service client to ensure we can fetch notifications regardless of RLS
+        from database import get_service_client
+        supabase = get_service_client()
         user_id = current_user["user_id"]
         
         response = supabase.table("notifications")\

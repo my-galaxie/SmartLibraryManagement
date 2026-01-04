@@ -13,6 +13,7 @@ router = APIRouter(prefix="/resources", tags=["Resources"])
 
 @router.get("")
 async def list_resources(
+    title: Optional[str] = Query(None),
     subject: Optional[str] = Query(None),
     semester: Optional[int] = Query(None),
     year: Optional[int] = Query(None),
@@ -23,10 +24,15 @@ async def list_resources(
     List academic resources with filters
     """
     try:
-        supabase = get_supabase_client()
+        # Use service client to bypass potentially restricted RLS if public read is not fully open
+        from database import get_service_client
+        supabase = get_service_client()
         
         query = supabase.table("resources").select("*")
         
+        if title:
+            # Using custom wildcard search for title
+            query = query.ilike("title", f"%{title}%")
         if subject:
             query = query.ilike("subject", f"%{subject}%")
         if semester:
@@ -59,8 +65,20 @@ async def upload_resource(
     Upload a new academic resource
     """
     try:
-        supabase = get_supabase_client()
+        # Use service client for storage operations to ensure permissions
+        from database import get_service_client
+        service_client = get_service_client()
         
+        # Ensure bucket exists
+        try:
+            buckets = service_client.storage.list_buckets()
+            bucket_names = [b.name for b in buckets]
+            if "resources" not in bucket_names:
+                logger.info("Creating 'resources' bucket...")
+                service_client.storage.create_bucket("resources", options={"public": True})
+        except Exception as bucket_err:
+             logger.warning(f"Bucket check/create failed (might already exist or permission issue): {bucket_err}")
+
         # 1. Generate unique filename
         file_ext = file.filename.split(".")[-1]
         unique_filename = f"{uuid.uuid4()}.{file_ext}"
@@ -69,10 +87,9 @@ async def upload_resource(
         # 2. Read file
         contents = await file.read()
         
-        # 3. Upload to Storage
-        # Assumption: 'resources' bucket exists and is public
+        # 3. Upload to Storage using service client
         try:
-            storage_response = supabase.storage.from_("resources").upload(
+            storage_response = service_client.storage.from_("resources").upload(
                 file_path,
                 contents,
                 {"content-type": file.content_type}
@@ -82,7 +99,7 @@ async def upload_resource(
              raise HTTPException(status_code=500, detail=f"Storage upload failed: {str(upload_err)}")
 
         # 4. Get Public URL
-        public_url_res = supabase.storage.from_("resources").get_public_url(file_path)
+        public_url_res = service_client.storage.from_("resources").get_public_url(file_path)
         file_url = public_url_res 
         
         # 5. Insert into Database
@@ -98,7 +115,7 @@ async def upload_resource(
             "uploaded_by": current_user["user_id"]
         }
         
-        db_response = supabase.table("resources").insert(resource_data).execute()
+        db_response = service_client.table("resources").insert(resource_data).execute()
         
         if not db_response.data:
             raise HTTPException(status_code=500, detail="Failed to save resource metadata")
@@ -148,4 +165,44 @@ async def download_resource(
         raise
     except Exception as e:
         logger.error(f"Download resource error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/{resource_id}")
+async def delete_resource(
+    resource_id: str,
+    current_user: dict = Depends(get_admin_user)
+):
+    """
+    Delete a resource
+    """
+    try:
+        from database import get_service_client
+        service_client = get_service_client()
+        
+        # Get resource to find file path
+        res = service_client.table("resources").select("*").eq("id", resource_id).single().execute()
+        if not res.data:
+            raise HTTPException(status_code=404, detail="Resource not found")
+            
+        resource = res.data
+        file_path = resource["file_path"]
+        
+        # Delete from storage
+        if file_path:
+            try:
+                service_client.storage.from_("resources").remove([file_path])
+            except Exception as storage_err:
+                logger.error(f"Failed to delete file from storage: {storage_err}")
+                # Continue to delete metadata even if file delete fails (orphaned file is better than broken UI)
+        
+        # Delete from database
+        service_client.table("resources").delete().eq("id", resource_id).execute()
+        
+        return {"message": "Resource deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Delete resource error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

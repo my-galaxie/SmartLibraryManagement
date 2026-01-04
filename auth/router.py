@@ -20,7 +20,8 @@ async def signup(request: SignupRequest):
             password=request.password,
             role=request.role,
             name=request.name,
-            student_id=request.student_id
+            student_id=request.student_id,
+            department=request.department
         )
         
         return {

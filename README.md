@@ -237,7 +237,7 @@ This project is licensed under the MIT License.
 
 ## 👥 Authors
 
-- **Sahana** - *Initial work* - [my-galaxie](https://github.com/my-galaxie)
+- **Sahana H J** - *Initial work* - [my-galaxie](https://github.com/my-galaxie)
 
 ## 🙏 Acknowledgments
 
@@ -245,9 +245,6 @@ This project is licensed under the MIT License.
 - Supabase for backend infrastructure
 - The open-source community
 
-## 📞 Support
-
-For support, email support@smartlibrary.com or open an issue on GitHub.
 
 ---
 
